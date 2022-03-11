@@ -108,6 +108,13 @@ Radiation Timestep [sec]: 10800
 Use GOSAT obs operator? : F
 Use TCCON obs operator? : F
 ------------------------+------------------------------------------------------
+%%% CO2 SIM MENU %%%    :
+3-D Chemical Oxid Source: F
+------------------------+------------------------------------------------------
+%%% CO SIM MENU %%%     :
+Use full chem. P(CO)|CH4: F
+Use full chem. P(CO)|VOC: F
+------------------------+------------------------------------------------------
 %%% OUTPUT MENU %%%     : 123456789.123456789.123456789.1--1=ZERO+2=BPCH
 Schedule output for JAN : OUTPUT_DATES
 Schedule output for FEB : OUTPUT_DATES

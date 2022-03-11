@@ -16,7 +16,7 @@
 #      in the OutputDir sub-folder of this run directory.
 #
 #============================================================================
-EXPID:  ./GEOSChem
+EXPID:  ./OutputDir/GEOSChem
 
 #==============================================================================
 # %%%%% COLLECTION NAME DECLARATIONS %%%%%
@@ -29,6 +29,7 @@ EXPID:  ./GEOSChem
 #==============================================================================
 COLLECTIONS: 'Restart',
              #'SpeciesConc',
+             #'SpeciesConcSubset',
              #'Budget',
 	     #'CH4',
              #'CloudConvFlux',
@@ -77,6 +78,28 @@ COLLECTIONS: 'Restart',
   SpeciesConc.duration:       00000100 000000
   SpeciesConc.mode:           'time-averaged'
   SpeciesConc.fields:         'SpeciesConc_?ADV?             ', 'GIGCchem',
+::
+#==============================================================================
+# %%%%% THE SpeciesConcSubset COLLECTION %%%%%
+#
+# Same as the SpeciesConc collection, but will subset data in the horizontal
+# and vertical dimensions so that the netCDF diagnostic files will cover
+# a smaller region of the globe.  This can save disk space and memory.
+#
+# NOTE: This capability will be available in GEOS-Chem "Classic" 12.5.0
+# and later versions.
+#
+# Available for all simulations
+#==============================================================================
+SpeciesConcSubset.template:     '%y4%m2%d2_%h2%n2z.nc4',
+SpeciesConcSubset.frequency:    030000,
+SpeciesConcSubset.format:       'CFIO',
+SpeciesConcSubset.duration:     00000001 000000,
+SpeciesConcSubset.mode:         'time-averaged',
+SpeciesConcSubset.LON_RANGE:    {lonmin} {lonmax},
+SpeciesConcSubset.LAT_RANGE:    {latmin} {latmax},
+SpeciesConcSubset.levels:       {levmin} {levmax},
+SpeciesConcSubset.fields:       'SpeciesConc_?ADV?',  'GIGCchem',
 ::
 #==============================================================================
 # %%%%% THE Budget COLLECTION %%%%%

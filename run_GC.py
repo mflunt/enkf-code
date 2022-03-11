@@ -24,14 +24,6 @@ import subprocess
 import glob
 import ast
 import os
-#import process_gc_output
-#import xarray
-#import LEnTKF
-#import scipy.linalg as sp_linalg
-#import matplotlib.pyplot as plt
-#import time as run_time
-#from acrg_grid import haversine
-
 import configparser
 ###########################################################################
 # Read these quantities from inputs.ini file
@@ -66,7 +58,7 @@ run_name_prefix = config["SETUP"]["run_name"]
 nested_tf = ast.literal_eval(config["SETUP"]["nested"])
 
 N_ens = int(config["ENKF"]["N_ens"])
-localization = float(config["ENKF"]["d_local"])
+#localization = float(config["ENKF"]["d_local"])
 lag_period = int(config["ENKF"]["lag_period"])
 lag_unit = config["ENKF"]["lag_unit"]
 assim_window = int(config["ENKF"]["assim_window"])
@@ -76,29 +68,53 @@ bc_split = config["STATE"]["bc_split"]
 sigma_x_ap = float(config["STATE"]["ap_uncertainty"])
 state_res  = config["STATE"]["state_resolution"]
 x_ap_cov_length = float(config["STATE"]["ap_cov_length"])
+land_only  = ast.literal_eval(config["STATE"]["land_only"])
 
 model_res = config["MODEL"]["resolution"]
 met_version = config["MODEL"]["met_version"]
-ch4_ref_value = float(config["MODEL"]["ch4_ref_conc"])
+ref_conc = float(config["MODEL"]["ref_conc"])
 spc_per_run = int((config["MODEL"]["tracers_per_run"]))
+
+surface_bool = ast.literal_eval(config["MODEL_OUTPUTS"]["surface_sites"])
+satellite_bool = ast.literal_eval(config["MODEL_OUTPUTS"]["satellites"])
+
+surf_out_freq = config["MODEL_OUTPUTS"]["out_freq"]
+
+out_bounds={}
+if surface_bool:
+    surface_sites = ast.literal_eval(config["MODEL_OUTPUTS"]["site_list"])
+    site_json_file = config["MODEL_OUTPUTS"]["site_json"]
+    
+    out_bounds["lat"] = ast.literal_eval( config["MODEL_OUTPUTS"]["lat_bounds"])
+    out_bounds["lon"] = ast.literal_eval(config["MODEL_OUTPUTS"]["lon_bounds"])
+    out_bounds["lev"] = ast.literal_eval(config["MODEL_OUTPUTS"]["lev_bounds"])
+else:
+    surface_sites=[]
+    out_bounds["lat"] = []
+    out_bounds["lon"] = []
+    out_bounds["lev"] = []
+
 
 data_root = config["DIRECTORIES"]["data_root"]
 gc_code_dir = config["DIRECTORIES"]["gc_code_dir"]+ "Code." + config["MODEL"]["gc_version"]
 #obs_dir = config["DIRECTORIES"]["obs_dir"]
 run_root = config["DIRECTORIES"]["run_root"]
 output_root = config["DIRECTORIES"]["output_root"]
-bc_input_dir = config["DIRECTORIES"]["bc_input_dir"]
+bc_input_root = config["DIRECTORIES"]["bc_input_root"]
 ens_file_root = config["DIRECTORIES"]["ensemble_file_dir"]
-restart_template_file = config["DIRECTORIES"]["restart_template_file"]
+restart_template_root = config["DIRECTORIES"]["restart_template_root"]
+
+restart_fstr = config["DIRECTORIES"]["restart_file_str"]
+
+bc_input_dir = bc_input_root + species + "/"
+restart_template_dir = restart_template_root + species + "/"
+restart_template_file = restart_template_dir + restart_fstr
 
 emission_keys={}
-if species == "CH4":
-    emission_keys["GFED"] = ast.literal_eval(config["CH4_EMISSIONS"]["GFED"])
-    emission_keys["QFED"] = ast.literal_eval(config["CH4_EMISSIONS"]["QFED"])
-    emission_keys["EDGAR_v432"] = ast.literal_eval(config["CH4_EMISSIONS"]["edgar_v432"])
-    emission_keys["Wetcharts"] = ast.literal_eval(config["CH4_EMISSIONS"]["wetcharts"])
-    emission_keys["Fung"] = ast.literal_eval(config["CH4_EMISSIONS"]["fung"])
-    emission_keys["Seeps"] = ast.literal_eval(config["CH4_EMISSIONS"]["seeps"])
+emis_key_list = list(config[species + "_EMISSIONS"])
+for key in emis_key_list:
+    emission_keys[key] = ast.literal_eval(config[species + "_EMISSIONS"][key])
+    
     
 if nested_tf:
     region_short = config["NESTED_MODEL"]["region_short"]
@@ -136,8 +152,9 @@ gc_make_dir = "./gc_files/"
 
 sigma_x_bc_ap = sigma_x_ap*1.
 #spc_IC = ["CH4IC", "CH4BC", "CH4REF"] 
-spc_IC = ["CH4REF"] 
+#spc_IC = ["CH4REF"] 
 
+spc_IC = [species+ "IC"]   #,species + "REF"]
 
 #region_short = None
 # Work out met dir from combination of data_root, met_name, res and region_short
@@ -159,11 +176,6 @@ if os.path.isdir(hemco_dir) == False:
 
 pd_run_start = pd.to_datetime(emis_start)
 
-#if lag_unit =="d":
-#    pd_lag_end = pd_run_start + pd.Timedelta(lag_period, unit="d")
-#elif lag_unit =="MS":    
-#    pd_lag_end = pd_run_start + relativedelta(months=lag_period)
-
 # Do each forward model run independently. 
 # Parse start date from command line
 n_assim_windows = 1
@@ -172,53 +184,31 @@ n_ens_runs = int(np.ceil(N_ens/spc_per_run))
 
 
 
-#run_length_days = (pd_run_end - pd_run_start).days 
-#
-#if window_unit =="d" and assim_window == 10:
-#    n_assim_windows = int(np.round(run_length_days/10.1))
-#elif window_unit == "MS":
-#    n_assim_windows = int(np.round((run_length_days/30)/assim_window))
-
-
-#assim_start_dates_pd=[pd_run_start]
-#assim_start_dates=[emis_start]
-#current_date = pd_run_start
-
-# Not needed if only 1 assim window per run.
-#for ti in range(1,n_assim_windows):      
-#    
-#    if window_unit =="d":
-#        new_date = current_date + pd.Timedelta(assim_window, unit="d")
-#    elif window_unit =="MS":
-#        new_date = current_date +  relativedelta(months=assim_window)
-#     
-#    if new_date.day == 31:
-#        new_date2 = new_date + pd.Timedelta(1, unit='d')
-#        assim_start_dates_pd.append(new_date2)
-#        assim_start_dates.append(new_date2.strftime('%Y%m%d'))
-#        current_date= new_date2
-#    else:
-#        d = np.mod(new_date.day,10)
-#        if d == 1:
-#            assim_start_dates_pd.append(new_date)
-#            assim_start_dates.append(new_date.strftime('%Y%m%d'))
-#            current_date = new_date
-#        else:
-#            days_past = np.mod(new_date.day, 10)
-#            new_date2 = new_date - pd.Timedelta(days_past-1, unit='d')
-#            assim_start_dates_pd.append(new_date2)
-#            current_date = new_date2
-#            
-#            assim_start_dates.append(new_date2.strftime('%Y%m%d'))
-
 if bc_split == "North-South":    
     nBC = 2
 elif bc_split == "NESW":
     nBC=4
+    for xi in range(nBC):
+        spc_IC.append(species + "_BC" + str(xi+1))
 elif bc_split == "None":
     nBC=0
 else:
     raise ValueError("Incorrect bc_split definition. Must be North-South or NESW")
+
+# Add reference species concentration
+    
+spc_IC.append(species + "REF")
+
+# For CO add chemical production terms
+if species == "CO":
+    
+    if emission_keys["GCCH4"] == True:
+        
+        spc_IC.append("COCH4")
+        
+    if emission_keys["GCNMVOC"] == True:
+        
+        spc_IC.append("CONMVOC")
 
 
 if model_res == "0.5x0.625":
@@ -263,12 +253,13 @@ lat_native = np.arange(latmin, latmax+dlat_native, dlat_native)
 nlon_native = len(lon_native)
 nlat_native = len(lat_native)
 
-# Get all land-based grid cells
-land_index, nland = ensemble_mod.create_land_mask(lat_state,lon_state)
+# Get all land-based grid cells - not appropriate for CO2 and CO 
+if land_only == True:
+    land_index, nland = ensemble_mod.create_land_mask(lat_state,lon_state)
 
 ensemb_names=[]
 for xi in range(N_ens):    
-    ensemb_names.append("CH4_E" + str(xi+1))
+    ensemb_names.append(species + "_E" + str(xi+1))
 
 #%%
 
@@ -278,8 +269,6 @@ for xi in range(N_ens):
 # Define times for first run
     
 pd_emis_start = pd.to_datetime(emis_start)
-
-
 
 if window_unit =="d":
     pd_assim_window_end = pd_emis_start + pd.Timedelta(assim_window, unit='d') 
@@ -366,27 +355,40 @@ lag_end_date = pd_lag_end.strftime('%Y%m%d')
 
 pd_scale_factor_dates.append(pd_lag_end)
 
-x0 = np.arange(nland)/nland+0.5
+#x0 = np.arange(nland)/nland+0.5
+    
+if land_only == True:
+    ngrid  = nland*1
+else:
+    ngrid = nlon_state*nlat_state
 
 nBC_all = nBC * n_emis_windows
-nland_all = nland * n_emis_windows
-nstate = nBC_all + nland_all # nstate = number of grid cells x number of time steps to be optimized.
+ngrid_all = ngrid * n_emis_windows
+nstate = nBC_all + ngrid_all # nstate = number of grid cells x number of time steps to be optimized.
 # i,e. if assim_window = 10 days
 # lag period = 50 days
 # n_assim_windows = 5. so nstate will be around 36500 big.   
 lons,lats = np.meshgrid(lon_state,lat_state)
 lats_v = np.ravel(lats)
 lons_v = np.ravel(lons)
-lats_land = lats_v[land_index]
-lons_land = lons_v[land_index]
-wh_nh = np.where(lats_land >= 0)[0]
-wh_sh = np.where(lats_land < 0)[0]
+
+#wh_nh = np.where(lats_land >= 0)[0]
+#wh_sh = np.where(lats_land < 0)[0]
+
+if land_only  == True:
+    lats_land = lats_v[land_index]
+    lons_land = lons_v[land_index]
+    lats_grid = lats_land.copy()
+    lons_grid = lons_land.copy()
+else:
+    lats_grid = lats_v.copy()
+    lons_grid = lons_v.copy()
 
 if inv_only == False: 
 # Need to also include boundary condition variables as well in statesize
     ens_file_dir = ens_file_root + run_name_prefix 
     subprocess.call(["mkdir", '-p', ens_file_dir])
-    fname_ens = ens_file_dir +"/" "ensemble_values_" + emis_start  + ".nc"
+    fname_ens = ens_file_dir +"/" + species + "_ensemble_values_" + emis_start  + ".nc"
     
     if overwrite_ensemble == False and len(glob.glob(fname_ens)) > 0:
         # load x_ens file
@@ -403,27 +405,31 @@ if inv_only == False:
     else:
         # Need to create the initial ensemble file
         # Crete based on covariance structure of P
-        x_ap = np.ones((nland))
-        P = ensemble_mod.create_prior_covariance(x_ap, sigma_x_ap, lats_land, lons_land, 
-                                                 correlated=True, length_scale = x_ap_cov_length,
-                                                 corr_type="balgovind")
+        x_ap = np.ones((ngrid))
         
-        X_devs_ens = ensemble_mod.create_ensemble_from_P(P, N_ens, nstate)
+        
+        dist_to_site = ensemble_mod.calc_dist_to_site(surface_sites, site_json_file, lats_v,lons_v)
+        
+        P,deltaspace = ensemble_mod.create_prior_covariance(x_ap, sigma_x_ap, lats_grid, lons_grid, 
+                                                 correlated=True, length_scale = x_ap_cov_length,
+                                                 corr_type="exp", site_dist = [])
+        
+        X_devs_ens = ensemble_mod.create_ensemble_from_P(P, N_ens, ngrid)
         
         x_ens = x_ap[:,None] + X_devs_ens
         
         # This function could be changed to something more intelligent.
         # At the moment, just randomly assigning scale factor values of ensemble members.
         
-        x_ens_3d,x_region_2d,x_time_2d = ensemble_mod.create_ensemble_file(x_ens, N_ens, nland+nBC,nBC, n_emis_windows,
+        x_ens_3d,x_region_2d,x_time_2d = ensemble_mod.create_ensemble_file(x_ens, N_ens, ngrid,nBC, n_emis_windows,
                                                                              window_start_dates_pd[:-1],
-                                                                             lats_land, lons_land,
+                                                                             lats_grid, lons_grid,
                                                                              sigma_x_ap, sigma_x_bc_ap,
                                                                              lonmin, lonmax, latmin,latmax,
-                                                                             dlon_state, dlat_state, land_index,
+                                                                             dlon_state, dlat_state, land_index=None,
                                                                              fname_ens = fname_ens,
                                                                              pseudo=False)
-        
+
 # Old cdoe        
 #        x_ens_3d,x_region_2d,x_time_2d = ensemble_mod.create_initial_ensemble(N_ens, nland+nBC,nBC, n_emis_windows,
 #                                                                             window_start_dates_pd[:-1],
@@ -447,9 +453,36 @@ if inv_only == False:
     scale_map_ensemble={}
    
     for xi,label in enumerate(ensemb_names):
-        scale_map_ensemble[label] = ensemble_mod.map_state_vector(x_ens_3d[:,nBC:,xi], lat_state,lon_state,land_index, n_emis_windows)
+        scale_map_ensemble[label] = ensemble_mod.map_state_vector(x_ens_3d[:,:,xi], 
+                          lat_state,lon_state,n_emis_windows,land_index=None, land_only = land_only)
     
         #x_ens[:,xi] = np.ravel(x_ens_3d[:,:,xi])
+
+    #if aggregate_afar == True:
+        
+    #dist_2d = np.reshape(dist_to_site, (nlat_state,nlon_state))
+
+#    wh = np.where(dist_2d > 800)
+#    
+#    keys = list(scale_map_ensemble.keys())
+#    for key in keys:
+#        
+#        idx_lat = wh[0][::4]
+#        idx_lon = wh[1][::4]
+#        
+#        scale_dum = scale_map_ensemble[key]  #[0,:,:]
+#        
+#        scale_dum_temp = scale_dum.copy()
+#        
+#        for ti in range(len(idx_lat)):
+#            
+#            #if idx_lat[ti] < np.max(idx_lat):
+#            scale_dum[:,idx_lat[ti]:idx_lat[ti]+4, idx_lon[ti]:idx_lon[ti]+4] = scale_dum_temp[:,idx_lat[ti],idx_lon[ti]]
+#        
+#        scale_map_ensemble[key] = scale_dum
+
+        #scale_map_ensemble[label] = ensemble_mod.aggregate_afar(scale_map_ensemble, dist_to_site,
+        #                                                          nlat_state,nlon_state)
 
 #%%
 
@@ -464,20 +497,23 @@ for ens_num in range(n_ens_runs):
     N_ens_50  = len(ensemb_names_50)
     
     
-    run_name=run_name_prefix + "_" + emis_start + "_ENS_" + str(ens_range[0]).zfill(2) + "-" +str(ens_range[1]) 
+    run_name=run_name_prefix + "_" + species + "_" + emis_start + "_ENS_" + str(ens_range[0]).zfill(2) + "-" +str(ens_range[1]) 
     run_dir = run_root + run_name + "/"
     output_dir = output_root + run_name + "/"
     
-    #bc_run_dir = run_root + run_name + "/BC/"
-    bc_output_dir = output_root + run_name + "/BC/"
+    #bc_output_dir = output_root + run_name + "/BC/"
+    #restart_out_dir = output_dir + "restarts/"
     
-    restart_out_dir = output_dir + "restarts/"
+    bc_output_dir = run_dir + "BC/"
+    restart_out_dir = run_dir + "restarts/"
     
     subprocess.call(["mkdir", '-p', run_dir])
     subprocess.call(["mkdir", '-p', output_dir])
     subprocess.call(["mkdir", '-p', run_dir + 'scale_factors'])
     
     subprocess.call(["mkdir", '-p', run_dir + 'input_files'])
+    
+    subprocess.call(["mkdir", '-p', run_dir + 'OutputDir'])
     
     subprocess.call(["ln", '-s', gc_code_dir, run_dir + "CodeDir"])
     
@@ -586,13 +622,18 @@ for ens_num in range(n_ens_runs):
         ensemble_mod.write_input_file_v12(emis_start, lag_start_date, ensemb_names_50, spc_IC,
                                       run_dir, output_dir, template_dir,  
                                       lonmin, lonmax, latmin,latmax,
-                                      model_res, species, met_version, region_short=region_short)
+                                      model_res, species, met_version, 
+                                      region_short=region_short)
+        # surface_sites, satellite_bool,
+                                      
         
         # Write the input file for the lag period
         ensemble_mod.write_input_file_v12(lag_start_date,lag_end_date, ensemb_names_50, spc_IC,
                                       run_dir, output_dir, template_dir,  
                                       lonmin, lonmax, latmin,latmax,
-                                      model_res, species, met_version, region_short=region_short, lag=True)
+                                      model_res, species, met_version, 
+                                      region_short=region_short, lag=True)
+        # surface_sites, satellite_bool,
         
         
         
@@ -609,14 +650,24 @@ for ens_num in range(n_ens_runs):
         
         
         # Write the HISTORY.rc file for GEOS-Chem
-        ensemble_mod.write_history_rc_v12(run_dir, template_dir, save_conc=False, save_bc = False)
+        ensemble_mod.write_history_rc_v12(run_dir, template_dir, save_bc = False, 
+                                          save_conc=surface_bool, conc_freq = surf_out_freq,
+                                          lon_bounds = out_bounds["lon"], lat_bounds = out_bounds["lat"],
+                                          lev_bounds = out_bounds["lev"] )
         
         # Write HEMCO diagnostics file
-        ensemble_mod.write_hemco_diagn_file(run_dir, ensemb_names_50)
+        
+        spc_emit_diagn = ensemb_names_50.copy()
+        if species == "CO":
+            spc_emit_diagn.append("COCH4")
+            spc_emit_diagn.append("CONMVOC")
+        
+        ensemble_mod.write_hemco_diagn_file(run_dir, spc_emit_diagn, species)
                              
-        
+       
         #%%
-        
+ 
+    
         # Write new restart file for each run. Base on output of optimized ensemble mean run 
         # But for first run, base on a spun-up global/regional run
         
@@ -631,23 +682,23 @@ for ens_num in range(n_ens_runs):
             
             ds_restart = ensemble_mod.write_restart_file_v12(restart_template_file, 
                                                                fname_restart_out, species, ensemb_names_50,spc_IC, 
-                                                               emis_start, ref_ch4 = ch4_ref_value, 
+                                                               emis_start, ref_conc = ref_conc, 
                                                                write_IC = True,
                                                                write_ens=True)
     #            ds_restart = ensemble_mod.write_restart_file(restart_input_file, ensemb_names,  
     #                                                         fname_restart_out, emis_start, spc_copy="CH4")
     
         #%%
-            
-        if nBC > 0:
-            bc_scalings_3d = x_ens_3d[:,:nBC,:]
-            bc_scalings =  {}
-            for xi, spc in enumerate(ensemb_names):
-                bc_scalings[spc]  = bc_scalings_3d[:,:,xi]
-        else:
-            bc_scalings =  {}
-            for xi, spc in enumerate(ensemb_names):
-                bc_scalings[spc]  = x_ens_3d[:,:1,xi]*0.+1.
+           
+#        if nBC > 0:
+#            bc_scalings_3d = x_ens_3d[:,:nBC,:]
+#            bc_scalings =  {}
+#            for xi, spc in enumerate(ensemb_names):
+#                bc_scalings[spc]  = bc_scalings_3d[:,:,xi]
+#        else:
+#            bc_scalings =  {}
+#            for xi, spc in enumerate(ensemb_names):
+#                bc_scalings[spc]  = x_ens_3d[:,:1,xi]*0.+1.
             
         # Need to include these terms in initial statesize. 23/7/19
         bc_str = "GEOSChem.BoundaryConditions."
@@ -663,7 +714,9 @@ for ens_num in range(n_ens_runs):
             # Only write BCs for CH4 species
             # All ensemble fields have BC=0. Only interested in emissions component.
             ensemble_mod.write_bc_ensemble_v12(emis_start, lag_start_date, lag_end_date, ensemb_names_50, bc_input_dir, bc_str,
-                                bc_output_dir, species = "CH4", ic_spc_names=spc_IC, BC_ensemble=False)
+                                bc_output_dir, species, spc_IC,
+                                latmin,latmax,lonmin,lonmax,
+                                bc_split = bc_split, BC_ensemble=False)
             
 #            ensemble_mod.write_bc_ensemble_v12(emis_start, lag_end_date, ensemb_names_50, bc_input_dir, bc_str,
 #                                bc_output_dir, species = "CH4", ic_spc_names=["CH4IC"], BC_ensemble=False)

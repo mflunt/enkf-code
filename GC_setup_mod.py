@@ -18,6 +18,7 @@ from tempfile import mkstemp
 from shutil import move
 from os import fdopen, remove
 import re
+import json
 
 def open_ds(fname):
     """
@@ -116,7 +117,7 @@ def create_land_mask(lat,lon):
     nland = len(land_index)
     return land_index, nland
 
-def map_state_vector(x_state, lat, lon, land_index, ntime):
+def map_state_vector(x_state, lat, lon, ntime, land_index=None, land_only=False):
     """
     Map state vector values onto land grid cells
     
@@ -130,13 +131,57 @@ def map_state_vector(x_state, lat, lon, land_index, ntime):
     scaling_v = np.zeros((nlat*nlon))
     scaling_map = np.zeros((ntime,nlat,nlon))
     for ti in range(ntime):
-        scaling_v[land_index] = x_state[ti,:]
+        if land_only == True:
+            scaling_v[land_index] = x_state[ti,:]
+        else:
+            scaling_v = x_state[ti,:]
         scaling_map[ti,:,:] = np.reshape(scaling_v, (nlat,nlon))
     
     return scaling_map
     
 
-def create_prior_covariance(x_ap, sigma_x, lat_state, lon_state, correlated=False, corr_type="exp", length_scale = 250):
+def calc_dist_to_site(sites, json_file, lats_state,lons_state):
+    """
+    Function to calculate minimum distance from any grid cell in a grid
+    to any specified measurement site
+    
+    Inputs: 
+        sites = list of site names
+        lon_state = longitudes of grid
+        lat_state = latitudes of grid
+    
+    Outputs:
+        min_dist = distance of any grid cell to nearest measurement site
+    """
+    nstate = len(lats_state)
+    
+    lat_sites=np.zeros((len(sites)))
+    lon_sites=np.zeros((len(sites)))
+    # OPen JSON file
+    with open(json_file) as f:
+        site_info=json.load(f)
+        
+    for si, site in enumerate(sites):
+    
+        dict_si = site_info[site]
+        
+        lat_sites[si] = dict_si["latitude"]
+        lon_sites[si] = dict_si["longitude"]
+    
+    
+    min_dist = np.zeros((nstate))
+    for ti in range(nstate):
+        dist_to_sites = multiple_dist_arrays([lats_state[ti],lons_state[ti]], 
+                  lat_sites,lon_sites)
+        
+        min_dist[ti] = np.min(dist_to_sites)
+        
+    return min_dist
+    
+
+
+def create_prior_covariance(x_ap, sigma_x, lat_state, lon_state, correlated=False, 
+                            corr_type="exp", length_scale = 250, site_dist=[]):
     
     nstate = len(x_ap)
     
@@ -156,17 +201,29 @@ def create_prior_covariance(x_ap, sigma_x, lat_state, lon_state, correlated=Fals
             deltaspace[ti,:] = multiple_dist_arrays([lat_state[ti],lon_state[ti]], 
                       lat_state,lon_state)
         
+        if len(site_dist) < 1:
+            length_scale2=length_scale*1
+        else:
+            
+            site_dist_corr = deltaspace.copy()*0.
+            site_dist2 = np.ceil(site_dist/200)
+            for ti in range(nstate):
+                site_dist_corr[ti,:] = site_dist2[ti]  #*site_dist2
+            
+            #length_scale2 = length_scale * np.ceil(site_dist/200.)
+            length_scale2 = length_scale * site_dist_corr
+        
         if corr_type == "exp":
-            SIGMA = np.exp((-1.)*deltaspace/length_scale)   # * np.exp((-1.)*deltatime/tau) 
+            SIGMA = np.exp((-1.)*deltaspace/length_scale2)   # * np.exp((-1.)*deltatime/tau) 
         elif corr_type == "balgovind":
-            SIGMA = (1.+ deltaspace/length_scale) *np.exp((-1.)*deltaspace/length_scale)
+            SIGMA = (1.+ deltaspace/length_scale2) *np.exp((-1.)*deltaspace/length_scale2)
             
         else:
             raise ValueError("Need to define a valid covariance structure")
         
         P = np.dot(P_diag,np.dot(SIGMA,P_diag))
         
-    return P
+    return P, deltaspace
 
 
 def create_ensemble_from_P(P, N_ens, nstate):
@@ -194,12 +251,32 @@ def create_ensemble_from_P(P, N_ens, nstate):
     
     return X_bg_devs_ens
 
+def aggregate_afar(scale_map_ensemble, dist_to_site,nlat_state,nlon_state):
+    """
+    Aggregate ensemble scalings far from site
+    
+    """
+    
+    dist_2d = np.reshape(dist_to_site, (nlat_state,nlon_state))
+    
+    wh = np.where(dist_2d > 1000)
+    
+    keys = scale_map_ensemble.keys()
+    for key in keys:
+        
+        scale_dum = scale_map_ensemble[key]
+
+        #scale_map_ensemble[key] = 
+    
+    return
+    
     
 
-def create_ensemble_file(x_ens_temp,N_ens, nstate0, nBC, ntime, dates, lats_land,lons_land,
-                            sigma_x_land, sigma_x_bc, lonmin, lonmax, latmin,latmax,
-                            dlon_state,dlat_state,land_index,
-                            fname_ens=None, pseudo=False):
+def create_ensemble_file(x_ens_temp,N_ens, nstate0, nBC, ntime, dates, lats_grid,lons_grid,
+                            sigma_x_ap, sigma_x_bc, lonmin, lonmax, latmin,latmax,
+                            dlon_state,dlat_state,land_index=None,
+                            fname_ens=None, pseudo=False,
+                            land_only = False):
     """
     Create an random ensemble array
     
@@ -228,15 +305,15 @@ def create_ensemble_file(x_ens_temp,N_ens, nstate0, nBC, ntime, dates, lats_land
     if pseudo == True:
         # Perturb NH and SH values for pseudo case
         
-        wh1 = np.where(lons_land >=24.)[0]
-        wh2 = np.where(lons_land < 24.)[0]
+        wh1 = np.where(lons_grid >=24.)[0]
+        wh2 = np.where(lons_grid < 24.)[0]
         x_ens[:,wh1,:] = x_ens[:,wh1,:] +0.2
         x_ens[:,wh2,:] = x_ens[:,wh2,:] -0.2
     
     #if BC are defined then overwrite first nBC entries with different ensemble
-    if nBC > 0:
-        x_ens_bc = np.random.normal(loc=1., scale=sigma_x_bc, size=(ntime, nBC, N_ens))
-        x_ens[:,:nBC,:] = x_ens_bc.copy()*1.
+#    if nBC > 0:
+#        x_ens_bc = np.random.normal(loc=1., scale=sigma_x_bc, size=(ntime, nBC, N_ens))
+#        x_ens[:,:nBC,:] = x_ens_bc.copy()*1.
 
     x_region=[]
     x_time=[]
@@ -246,10 +323,11 @@ def create_ensemble_file(x_ens_temp,N_ens, nstate0, nBC, ntime, dates, lats_land
         x_time0=[]
         for xi in range(nstate0):
             
-            if xi < nBC:
-                x_region0.append("BC" + str(xi+1))
-            else:
-                x_region0.append("Q" + str(xi-nBC+1))
+#            if xi < nBC:
+#                x_region0.append("BC" + str(xi+1))
+#            else:
+            x_region0.append("Q" + str(xi-nBC+1))
+            
             x_time0.append(dates[ti].strftime('%Y%m%d'))
 
         x_time.append(x_time0)
@@ -263,13 +341,14 @@ def create_ensemble_file(x_ens_temp,N_ens, nstate0, nBC, ntime, dates, lats_land
         ds_ensemble = xarray.Dataset()
         ds_ensemble["x_ens"] = (('time', 'state', 'member'), x_ens)
         ds_ensemble["x_region"] = (('time','state'), x_region_out)
-        ds_ensemble["x_lon"] = (("state"), lons_land)
-        ds_ensemble["x_lat"] = (("state"), lats_land)
-        ds_ensemble["land_indices"] = (("state"), land_index)
+        ds_ensemble["x_lon"] = (("state"), lons_grid)
+        ds_ensemble["x_lat"] = (("state"), lats_grid)
+        if land_only == True:
+            ds_ensemble["land_indices"] = (("state"), land_index)
         ds_ensemble['time'] = dates
         ds_ensemble["nBC"] = nBC
-        ds_ensemble["nland"] = nstate0-nBC
-        ds_ensemble["sigma_x_land"] = sigma_x_land
+        ds_ensemble["ngrid"] = nstate0
+        ds_ensemble["sigma_x_land"] = sigma_x_ap
         ds_ensemble["sigma_x_bc"] = sigma_x_bc
         ds_ensemble["lonmin"] = lonmin  
         ds_ensemble["lonmax"] = lonmax 
@@ -280,11 +359,10 @@ def create_ensemble_file(x_ens_temp,N_ens, nstate0, nBC, ntime, dates, lats_land
         
         ds_ensemble.to_netcdf(path=fname_ens, mode="w")
     
-    
     return x_ens, x_region_out, x_time_out
 
 
-def write_scale_factor_file(dates_out, lat,lon,scale_map_ensemble, spc_prefix, fname_out,
+def write_scale_factor_file(dates_out, lat,lon,scale_map_ensemble, spc_emit, fname_out,
                             assim_window, start_date, end_date):
     """
     Write scale factor netcdf file for GC run. 
@@ -304,8 +382,11 @@ def write_scale_factor_file(dates_out, lat,lon,scale_map_ensemble, spc_prefix, f
     
     dlat = lat[1]-lat[0]
     dlon = lon[1]-lon[0]
-    lat_out = np.arange(lat[0]-dlat*3, lat[-1]+dlat*4, dlat)
-    lon_out = np.arange(lon[0]-dlon*3, lon[-1]+dlon*4, dlon)
+    #lat_out = np.arange(lat[0]-dlat*3, lat[-1]+dlat*4, dlat)
+    #lon_out = np.arange(lon[0]-dlon*3, lon[-1]+dlon*4, dlon)
+    
+    lat_out = np.arange(lat[0], lat[-1]+dlat, dlat)
+    lon_out = np.arange(lon[0], lon[-1]+dlon, dlon)
     
     #pd_days = pandas.date_range(start_date,end_date)
     
@@ -313,15 +394,19 @@ def write_scale_factor_file(dates_out, lat,lon,scale_map_ensemble, spc_prefix, f
     ndays = len(dates_out)
     #scale_factor_field = np.zeros((ndays, nlat+6, nlon+6))
     
-    for label in spc_prefix:
-        scale_factor_field = np.zeros((ndays, nlat+6, nlon+6))
+    for label in spc_emit:
+        
+        label_split = label.split("_")[1]
+        scale_factor_field = np.zeros((ndays, nlat, nlon))
 #        scale_factor_field[:assim_window,2:-2,2:-2] = scale_map_ensemble[label]
 #        scale_factor_field[assim_window:,:,:] = 0.
         
-        scale_factor_field[0,3:-3,3:-3] = scale_map_ensemble[label]*1.
+        #scale_factor_field[0,3:-3,3:-3] = scale_map_ensemble[label]*1.
+        
+        scale_factor_field[0,:,:] = scale_map_ensemble[label]*1.
         #scale_factor_field[1:,:,:] = 0.
         
-        ds_out[label] = (("time", "lat","lon"), scale_factor_field)
+        ds_out[label_split] = (("time", "lat","lon"), scale_factor_field)
     
     
     
@@ -357,9 +442,10 @@ def write_scale_factor_file(dates_out, lat,lon,scale_map_ensemble, spc_prefix, f
     ds_out["lon"].attrs["units"] =  'degrees_east'
     ds_out["lon"].attrs["axis"] =  'X'
     
-    for label in spc_prefix:
-        ds_out[label].attrs["units"] = "1"
-        ds_out[label].attrs["long_name"] = "Scaling factor for " +  label + " variable"
+    for label in spc_emit:
+        label_split = label.split("_")[1]
+        ds_out[label_split].attrs["units"] = "1"
+        ds_out[label_split].attrs["long_name"] = "Scaling factor for " +  label + " variable"
     
     ds_out.to_netcdf(path=fname_out, mode='w')
     
@@ -386,13 +472,17 @@ def write_mask_file(dates_out, lat,lon, fname_out,
     
     dlat = lat[1]-lat[0]
     dlon = lon[1]-lon[0]
-    lat_out = np.arange(lat[0]-dlat*3, lat[-1]+dlat*4, dlat)
-    lon_out = np.arange(lon[0]-dlon*3, lon[-1]+dlon*4, dlon)
+    #lat_out = np.arange(lat[0]-dlat*3, lat[-1]+dlat*4, dlat)
+    #lon_out = np.arange(lon[0]-dlon*3, lon[-1]+dlon*4, dlon)
+    
+    lat_out = np.arange(lat[0], lat[-1]+dlat, dlat)
+    lon_out = np.arange(lon[0], lon[-1]+dlon, dlon)
     
     pd_days = pandas.date_range(start_date,end_date)
     
     ndays = len(pd_days)
-    mask_field = np.zeros((ndays, nlat+6, nlon+6))
+    #mask_field = np.zeros((ndays, nlat+6, nlon+6))
+    mask_field = np.zeros((ndays, nlat, nlon))
     
     if assim_window == 10:
         if start_date[-2:]=="21":
@@ -474,9 +564,10 @@ def write_input_file_v12(start_date, end_date, spc_names, spc_BC,
                      run_dir, output_dir, template_dir, 
                      lonmin,lonmax,latmin,latmax,
                      grid_res, species, met_type_in,
-                     data_dir = "/geos/d21/GC_DATA/",
+                     data_dir = "/geos/d21/GC_DATA/ExtData/",
                      sat_TF = "T",
-                     region_short=None, lag=False):
+                     region_short=None, lag=False,
+                     co2_chem=False):
     """
     Write the input.geos file for each assimilation run. 
     Length of run needs to be for whole of lag period.
@@ -502,6 +593,7 @@ def write_input_file_v12(start_date, end_date, spc_names, spc_BC,
     sim_number={}
     sim_number["CH4"] = "9"
     sim_number["CO2"] = "12"
+    sim_number["CO"] = "7"
     
     dlon_dict = {}
     dlon_dict["0.25x0.3125"] = 0.3125
@@ -526,12 +618,12 @@ def write_input_file_v12(start_date, end_date, spc_names, spc_BC,
         gc_run_name = met_type.lower() + "_" + res_str[grid_res] + "_" + species + "_" + region_short.lower()
         nested = "T"
         Buffer = "3"
-        tstep_trans_conv = "600"     # Transport timestep in seconds # was 300 edited 12/11/19
+        tstep_trans_conv = "300"     # Transport timestep in seconds # was 300 edited 12/11/19
         
         if lag ==True:
             tstep_emis_chem = "3600"   # was 600
         else:
-            tstep_emis_chem = "1800"
+            tstep_emis_chem = "600"
     else:
         # GLOBAL simulation
         gc_run_name = met_type.lower() + "_" + res_str[grid_res] + "_" + species 
@@ -544,13 +636,15 @@ def write_input_file_v12(start_date, end_date, spc_names, spc_BC,
     dlon = dlon_dict[grid_res]
     dlat = dlat_dict[grid_res]
     
-    latmin3 = latmin - dlat*3   # Add buffer to grid size
-    latmax3 = latmax + dlat*3   # Add buffer to grid size
-    lonmin3 = lonmin - dlon*3   # Add buffer to grid size
-    lonmax3 = lonmax + dlon*3   # Add buffer to grid size
+#    latmin3 = latmin - dlat*3   # Add buffer to grid size
+#    latmax3 = latmax + dlat*3   # Add buffer to grid size
+#    lonmin3 = lonmin - dlon*3   # Add buffer to grid size
+#    lonmax3 = lonmax + dlon*3   # Add buffer to grid size  
+#    nlon_grid = (lonmax3-lonmin3)/dlon + 1
+#    nlat_grid = (latmax3-latmin3)/dlat + 1
     
-    nlon_grid = (lonmax3-lonmin3)/dlon + 1
-    nlat_grid = (latmax3-latmin3)/dlat + 1
+    nlon_grid = (lonmax-lonmin)/dlon + 1
+    nlat_grid = (latmax-latmin)/dlat + 1
     
     Imin_region = str(1 + int(Buffer)*2)
     Jmin_region = str(1 + int(Buffer)*2)
@@ -564,9 +658,9 @@ def write_input_file_v12(start_date, end_date, spc_names, spc_BC,
     pd_end = pandas.to_datetime(end_date)
     
     if type(spc_BC) == list:
-        spc_IC = ["CH4"] + spc_BC
+        spc_IC = [species] + spc_BC
     else:
-        spc_IC = ["CH4"]
+        spc_IC = [species]
         
     
     month_index = {1:"JAN",
@@ -581,8 +675,6 @@ def write_input_file_v12(start_date, end_date, spc_names, spc_BC,
                    10:"OCT",
                    11:"NOV",
                    12:"DEC"}
-    
-    
     
     #if pd_end.month == pd_lag_start.month:
         
@@ -608,7 +700,6 @@ def write_input_file_v12(start_date, end_date, spc_names, spc_BC,
     else:
         spc_advect = spc_IC 
     nAdvect = len(spc_advect)  # Have to remeber to add 2 for CH4 and CH4REF
-    
     
     # 3. Define tracer number list to write 
     
@@ -655,11 +746,11 @@ def write_input_file_v12(start_date, end_date, spc_names, spc_BC,
                 
                 
             if "lonmin" in line:
-                line = line.replace('{lonmin}', str(lonmin3))
-                line = line.replace('{lonmax}', str(lonmax3))
+                line = line.replace('{lonmin}', str(lonmin))
+                line = line.replace('{lonmax}', str(lonmax))
             if "latmin" in line:
-                line = line.replace('{latmin}', str(latmin3))
-                line = line.replace('{latmax}', str(latmax3))
+                line = line.replace('{latmin}', str(latmin))
+                line = line.replace('{latmax}', str(latmax))
             if "Nested?" in line:
                 line = line.replace('{Nested?}', nested)
             if "Buffer" in line:
@@ -689,9 +780,9 @@ def write_input_file_v12(start_date, end_date, spc_names, spc_BC,
                 
             
             if "Species Entries ------->: Name" in line:    
-                for si, species in enumerate(spc_advect):
+                for si, spc in enumerate(spc_advect):
                     dummy_str = "Species #"+str(si+1)
-                    line = line + dummy_str.ljust(str_len) + ": " + species + "\n"  
+                    line = line + dummy_str.ljust(str_len) + ": " + spc + "\n"  
                     #line = line + "Species #"+str(si+1)+"              : " + species + "\n"    
             
             if "OUTPUT_DATES" in line:
@@ -708,14 +799,28 @@ def write_input_file_v12(start_date, end_date, spc_names, spc_BC,
                     else:
                         string_0s = "0"*29                    
                     line=line.replace("OUTPUT_DATES", string_0s)
-                
+            
+            if species == "CO2":
+                if co2_chem == True:
+                    if "3-D Chemical Oxid Source" in line:
+                        line = line.replace(": F",  ": T")
+                        
+            if species == "CO":
+                if "Use full chem. P(CO)" in line: 
+                    line = line.replace(": F",  ": T")
+            
+            
+            # Write surface output section?
+            
+            
+            
             out_file.write(line)
 
     print("Successfully written file " + run_dir + "input.geos")
     
     return
 
-def write_hemco_config_v12(start_date, end_date, spc_emit, fname_scale_factors,
+def write_hemco_config_v12_ch4(start_date, end_date, spc_emit, fname_scale_factors,
                        run_dir, template_dir, species, emission_keys, 
                        met_dir, hemco_dir, restart_dir, BC_dir,fname_masks,
                        region_short=None):
@@ -972,6 +1077,276 @@ def write_hemco_config_v12(start_date, end_date, spc_emit, fname_scale_factors,
     print("Successfully written file " + run_dir + "HEMCO_Config.rc")
     return
     
+def write_hemco_config_v12(start_date, end_date, spc_emit, fname_scale_factors,
+                       run_dir, template_dir, species, emission_keys, 
+                       met_dir, hemco_dir, restart_dir, BC_dir,fname_masks,
+                       region_short=None, border_mask = "1012"):
+    """
+    Write the HEMCO_Config.rc file for each assimilation run. 
+    
+    Inputs:
+        start_date (string): "YYYYMMDD" start of emissions lag period
+        end_date (string): "YYYYMMDD" End of obs assimilation window
+        spc_emit (N_ens): Name of ensemble members
+        fname_Scale_factors (string): Full path of scale factor file
+        run_dir (string): Directory where run code is located.
+        template_dir (string): Directory where template file is located
+        
+        emission_keys: Dictionary of True/False values for different emission types
+        
+    Requires:
+        Template file - input_ensemble.template - to be setup correctly. 
+    """
+    
+    template_file = template_dir + "HEMCO_Config_" + species + "_v12.template"
+
+    
+    spc_fixed = [species]
+    
+    pd_start = pandas.to_datetime(start_date)
+    pd_end = pandas.to_datetime(end_date)
+    
+    start_year = pd_start.year
+    end_year = pd_end.year
+    
+    # define diagnostic outfile name
+    #diagn_infile_path = run_dir + "MyDiagnFile.rc" 
+    diagn_infile_path = run_dir + "HEMCO_Diagn.rc"
+    
+    diagn_freq = "End"  # Will probabl want to use "Monthly"
+    diagn_prefix = "HEMCO_diagnostics" #+ start_date
+    
+    #%%
+    #####################################################################################
+    # 3. Define tracer list to write 
+    spc_list1 = "/".join(spc_fixed) 
+    if type(spc_emit) == list:
+        spc_list2 = "/".join(spc_emit)
+        spc_list = spc_list1 + "/" + spc_list2
+    else:
+        spc_list = spc_list1
+    #%%
+    mask_no = {}
+    if type(spc_emit) == list:
+        for si,spc in enumerate(spc_emit):
+            mask_no[spc] = str(1101 + si)
+    #%%
+    with open(template_file, "r") as in_file:
+        filedata = in_file.readlines()
+    
+    with open(run_dir + "input_files/window_HEMCO_Config.rc", "w") as out_file:
+        for line in filedata:
+            
+            
+            if "HEMCO_DIR" in line: 
+                line = line.replace("{HEMCO_DIR}", hemco_dir)
+            if "MET_DIR" in line: 
+                line = line.replace("{MET_DIR}", met_dir)
+                
+            if "RESTART_DIR" in line: 
+                line = line.replace("{RESTART_DIR}", restart_dir)
+            if "BC_DIR" in line: 
+                line = line.replace("{BC_DIR}", BC_dir)
+            
+            if "HemcoDiagnosticFileName" in line: 
+                line = line.replace("{HemcoDiagnosticFileName}", diagn_infile_path)
+            if  "HemcoDiagnosticPrefix" in line:
+                line = line.replace("{HemcoDiagnosticPrefix}", diagn_prefix)          
+            if "HemcoDiagnosticFreq" in line:
+                line = line.replace("{HemcoDiagnosticFreq}", diagn_freq)   
+                        
+#            if "SpeciesList" in line:
+#                line = line.replace("SpeciesList", spc_list )
+               
+                
+            if "{REG_SHORT}" in line:
+                if region_short:
+                    line = line.replace("{REG_SHORT}", region_short + ".")
+                else:
+                    line = line.replace("{REG_SHORT}", "")
+                    
+               
+            if "{BORDER_MASK}" in line:
+                line = line.replace("{BORDER_MASK}", border_mask)
+                
+            if type(spc_emit) == list:
+                
+                
+                if emission_keys["GFED"] == True:
+                    
+                    if "111     GFED" in line:
+                        line = line.replace("off", "on")
+                        
+                    if "SpeciesList" in line:
+                        line = line.replace("SpeciesList", spc_list )
+                    
+                # Only need to do this if I have tagged species
+                    if "--> fraction POG1" in line:    
+                            for si, spc in enumerate(spc_emit):
+                                spc_no = spc[5:]
+                                line = line + "    --> ScaleField_" + species +"     :    GFED_SCALEFIELD_"+spc_no+"\n"
+                                
+                    if "## Insert scalefields here ##" in line:
+                        for si, spc in enumerate(spc_emit):
+                            spc_no = spc[5:]
+                            line = line + "\n" + "111 GFED_SCALEFIELD_" + spc_no + \
+                            "   1  -  2010/1/1/0 C xy unitless * " + mask_no[spc] + "/1012" + " 1 1"
+                
+                if emission_keys["TNO_COMBUST"] == True:
+                    
+                    tno_emis_sectors = ["A", "B", "C", "F", "G", "H", "I"]
+                    tno_emis_list = [species + "_A_PUB_POW", species + "_B_INDUSTRY", 
+                                         species + "_C_OTH_COMB", species + "_F_RD_TRANS",
+                                        species + "_G_SHIPS", species + "_H_AVIATION",
+                                         species + "_I_OFFROAD"]
+                    
+                    
+                    if "--> TNO_COMBUST" in line:
+                        line = line.replace("false", "true")
+                        
+                       
+                    for xi, sector in enumerate(tno_emis_sectors):    
+                
+                        if sector == "A":
+                            time_scale_str = "/240/70/120/"
+                        elif sector == "B":
+                            time_scale_str = "/241/71/121/"
+                        elif sector == "C":
+                            time_scale_str = "/242/72/122/"
+                        elif sector == "F":
+                            time_scale_str = "/243/73/123/"
+                        else: 
+                            time_scale_str = "/" 
+                        
+                        if "0 " + species + "_" + sector in line:
+                            for si, spc_i in enumerate(spc_emit):
+                                line = line + "0 " + tno_emis_list[xi] + "_" + str(si) + "   -   -    -   -  -   -  " + \
+                                spc_i + " " + mask_no[spc_i] + time_scale_str + border_mask + " " + str(xi+1) + " 1\n"    
+            
+                if emission_keys["TNO_OTHER"] == True:
+                    
+                    if "--> TNO_OTHER" in line:
+                        line = line.replace("false", "true")
+                        
+                    if  species + "_Z_NONCOMB" in line:
+                        for si, spc_i in enumerate(spc_emit):
+                            line = line + "0 " + species + "_Z_NONCOMB_" +  str(si) + "   -   -    -   -  -   -  " + \
+                            spc_i + " " + mask_no[spc_i] + "/" + border_mask + " 8 1\n"    
+                
+                if species == "CO":
+                    if emission_keys["TNO_EF"] == True:
+                        
+                        if "--> TNO_EF" in line:
+                            line = line.replace("false", "true")
+                            
+                        # Need to explicitly write out each separate species file info and units etc.
+                        # Otherwise just copies the CO entry for all tagged species
+                        if  species + "_EF_TOTAL" in line:
+                            for si, spc_i in enumerate(spc_emit):
+                                line = (line + "0 " + species + "_EF_TOTAL_" +  str(si) + 
+                                        "   ./input_files/TNO_CO_emis_ens_"+ str(start_year) + ".nc     "
+                                        + "emis_E" + str(si+1) + 
+                                "   " + str(start_year) +"/1/1/0 C xy kg/m2/s  " + \
+                                spc_i + " " + border_mask + " 1 1\n")    
+                        
+                        
+                if emission_keys["GFAS"] == True:      
+                    
+                    if "--> GFAS" in line:
+                        line = line.replace("false", "true")
+                        
+                    if "0 GFAS_" + species in line:
+                        for si, spc in enumerate(spc_emit):
+                            line = line + "0 GFAS_" + species+ "_" + str(si) + "   -   -    -   -  -   -  " + \
+                            spc + " " + mask_no[spc] + "/" + border_mask + " 9 1\n"   
+                        
+                        
+                # CO only keys
+                if species == "CO":
+                    if emission_keys["GCCH4"] == True:      
+                        
+                        if "--> GCCH4" in line:
+                            line = line.replace("false", "true")
+                            
+                        if "0 GCCH4_" + species in line:
+                            
+                            line = line + "0 GCCH4_" + species + "_" + str(si) + "   -   -    -   -  -   -  " + \
+                            "COCH4" + " " "175/" + border_mask + " 10 1\n"   
+                                
+                    if emission_keys["GCNMVOC"] == True:      
+                        
+                        if "--> GCNMVOC" in line:
+                            line = line.replace("false", "true")
+                            
+                        if "0 GCNMVOC_" + species in line:
+                            line = line + "0 GCNMVOC_" + species+ "_" + str(si) + "   -   -    -   -  -   -  " + \
+                            "CONMVOC" + " " + "175/" + border_mask + " 11 1\n"   
+                            
+               
+             
+                # CO2 only keys
+                if species == "CO2":        
+                    if emission_keys["CASA"] == True:      
+                        
+                        if "--> BBIO_CASA" in line:
+                            line = line.replace("false", "true")
+                            
+                        if "0 CASA_" + species in line:
+                            for si, spc in enumerate(spc_emit):
+                                line = line + "0 CASA_" + species + "_" + str(si) + "   -   -    -   -  -   -  " + \
+                                spc + " " + "44/" + mask_no[spc] + "/" + border_mask + " 9 1\n"   
+                                
+                                
+                    if emission_keys["OCEAN_TAKA"] == True:      
+                        
+                        if "--> OCEAN_EXCH_TAKA09" in line:
+                            line = line.replace("false", "true")
+                            
+                        if "0 CO2_TAKA_ANNUAL"  in line:
+                            for si, spc in enumerate(spc_emit):
+                                line = line + "0 CO2_TAKA_ANNUAL" + "_" + str(si) + "   -   -    -   -  -   -  " + \
+                                spc + " "  + mask_no[spc] + "/" + border_mask + " 10 1\n"   
+                                
+                        if "0 CO2_TAKA_MONTHLY"  in line:
+                            for si, spc in enumerate(spc_emit):
+                                line = line + "0 CO2_TAKA_MONTHLY" + "_" + str(si) + "   -   -    -   -  -   -  " + \
+                                spc + " "  + mask_no[spc] + "/" + border_mask + " 10 2\n"   
+                        
+        
+        # Need to write in the mask definitions and ensure that numbers correspond with definitions above
+        
+                if "## Insert scale factors here ##" in line:
+                    for si, spc in enumerate(spc_emit):
+                        #spc_no = spc[5:] # Need to change this
+                        split_str = spc.split("_")[1]
+                        spc_no = split_str[1:]
+                      
+                        if start_year == end_year:
+                            line = line + mask_no[spc] + "  ENSEMB_" + spc_no + "  " \
+                            + fname_scale_factors + "   " + split_str + "  " + \
+                            str(start_year) + "/1-12/1-31/0 RF xy 1 1 " + "\n"
+                        else:
+                            line = line + mask_no[spc] + "  ENSEMB_" + spc_no + "  " \
+                            + fname_scale_factors + "   " + split_str + "  " + \
+                            str(start_year) + "-" + str(end_year) + "/1-12/1-31/0 RF xy 1 1 " + "\n"  # Changed from RF
+                        
+                    # RF  = Range forced. HEMCO will raise an error if simulation dates outside of the stated range.
+
+                if "## Insert masks here ##" in line:
+                    if start_year == end_year:
+                        line = line + border_mask + " NAF_MASK" + "  " \
+                                + fname_masks + "   " + "MASK" + "  " + \
+                                str(start_year) + "/1-12/1-31/0 EF xy 1 1 " + "-25/-40/60/40" + "\n"
+                    else:
+                        line = line + border_mask + " NAF_MASK" + "  " \
+                                + fname_masks + "   " + "MASK" + "  " + \
+                                str(start_year) + "-" + str(end_year) + "/1-12/1-31/0 EF xy 1 1 " + "-25/-40/60/40" + "\n"
+
+            out_file.write(line)
+    
+    print("Successfully written file " + run_dir + "HEMCO_Config.rc")
+    return
+
 def write_hemco_lag_config_v12(run_dir, template_dir, species, 
                        met_dir, hemco_dir, restart_dir, BC_dir,
                        region_short=None):
@@ -1041,7 +1416,7 @@ def write_hemco_lag_config_v12(run_dir, template_dir, species,
     return
     
     
-def write_hemco_diagn_file(run_dir, spc_emit):
+def write_hemco_diagn_file(run_dir, spc_emit, species):
     # Write diagnostic HEMCO file to specify emissions totals    
     
     # Probably want to write sectors to output as well. Particularly GFED and wetlands. 
@@ -1062,7 +1437,7 @@ def write_hemco_diagn_file(run_dir, spc_emit):
                 line = "# Name        Spec    ExtNr Cat Hier Dim OutUnit \n"
     
             elif ti ==1: 
-                line = "CH4" + "     " +  "CH4" + "  -1   -1  -1   2   kg/m2/s \n"  
+                line = species + "     " +  species + "  -1   -1  -1   2   kg/m2/s \n"  
             else: 
                 line = spc_emit[ti-2] + "     " +  spc_emit[ti-2] + "  -1   -1  -1   2   kg/m2/s \n"  
     
@@ -1073,7 +1448,7 @@ def write_hemco_diagn_file(run_dir, spc_emit):
     
     
 def write_history_rc_v12(run_dir,template_dir,save_conc=False, save_bc = False,
-                           conc_freq = '6H'):
+                           conc_freq = '3H', lon_bounds = [], lat_bounds=[], lev_bounds=[]):
     """
     Write the HEMCO_Config.rc file for each assimilation run. 
     
@@ -1093,19 +1468,32 @@ def write_history_rc_v12(run_dir,template_dir,save_conc=False, save_bc = False,
         for line in filedata:
                 
             if save_conc == True:
-                if "#'SpeciesConc'," in line:
-                    line = line.replace("#" "")
+                if "#'SpeciesConcSubset'," in line:
+                    line = line.replace("#", "")
                                         
-                if "SpeciesConc.frequency:" in line:
+                if "SpeciesConcSubset.frequency:" in line:
                     
                     if conc_freq[-1] == "H":
-                        rep_str = "00000000 " + conc_freq[:-1].zfill(2) + "0000"
-                    elif conc_freq[-1] == "D":
-                        rep_str = "000000" + conc_freq[:-1].zfill(2) + " 000000"
+                        rep_str = conc_freq[:-1].zfill(2) + "0000"
                     elif conc_freq[-1] == "D":
                         rep_str = "000000" + conc_freq[:-1].zfill(2) + " 000000"
                     
-                    line = line.replace("00000100 000000", rep_str)
+                    line = line.replace("030000", rep_str)
+                    
+                if "SpeciesConcSubset.LON_RANGE" in line:
+                    
+                    line = line.replace("{lonmin}", str(lon_bounds[0]))
+                    line = line.replace("{lonmax}", str(lon_bounds[1]))
+                    
+                if "SpeciesConcSubset.LAT_RANGE" in line:
+                    
+                    line = line.replace("{latmin}", str(lat_bounds[0]))
+                    line = line.replace("{latmax}", str(lat_bounds[1]))
+                    
+                if "SpeciesConcSubset.levels" in line:
+                    
+                    line = line.replace("{levmin}", str(lev_bounds[0]))
+                    line = line.replace("{levmax}", str(lev_bounds[1]))
                                             
             if save_bc == True:
                 if "#'BoundaryConditions'," in line:
@@ -1117,16 +1505,20 @@ def write_history_rc_v12(run_dir,template_dir,save_conc=False, save_bc = False,
     return
     
 def write_restart_file_v12(fname_in, fname_out, species, ensemb_names, spc_IC, emis_start, 
-                           ref_ch4 = 1700, write_IC=False, write_ens=False):
+                           ref_conc = 1700, write_IC=False, write_ens=False):
     """
     Write restart file for ensemble runs
     
-    Need to copy an input CH4 field.
+    Need to copy an input Concentration field.
     For first run this will be spinup field.
     
     Need restart file to be in right format for v12.4 and v12.5
     Assume it is, but might need to add some more checks to make sure this works in future...
     """
+    if species in (["CO", "CH4"]):
+        unit_convert = 1.e-9
+    elif species == "CO2":
+        unit_convert = 1.e-6
     
     species_main = "SpeciesRst_"+ species
     
@@ -1138,18 +1530,29 @@ def write_restart_file_v12(fname_in, fname_out, species, ensemb_names, spc_IC, e
         rename_dict={}
         rename_dict["SPC_"+species] = "SpeciesRst_"+species
         ds_out = ds.rename(name_dict=rename_dict)
+        
+    # Remove any extra keys from template file
+    keys_orig = list(ds.keys())
+    for key in keys_orig:
+        
+        if key != "SpeciesRst_"+species:
+            
+            ds_out = ds_out.drop(key)
     
     ds_out.coords["time"]  = [pandas.to_datetime(emis_start)]
     
-    ref_field = ds_out["SpeciesRst_"+species].copy()*0.+ref_ch4*1.e-9  # Convert to mol/mol
+    ref_field = ds_out["SpeciesRst_"+species].copy()*0.+ref_conc*unit_convert   #1.e-9  # Convert to mol/mol
     ref_field.attrs = ds_out["SpeciesRst_"+species].attrs
     
     if write_IC ==True:
         for spc in spc_IC:
-            if spc == "CH4IC":
+            if spc == species + "IC":
                 ds_out["SpeciesRst_"+spc] = ds_out["SpeciesRst_"+species].copy()
-            elif spc == "CH4REF":
+            elif spc == species + "REF":
                 ds_out["SpeciesRst_"+spc] = ref_field
+            else:
+                ds_out["SpeciesRst_"+spc] = ref_field*0.
+                ds_out["SpeciesRst_"+spc].attrs = ref_field.attrs
 
     if write_ens == True:
         for spc in ensemb_names:
@@ -1160,7 +1563,9 @@ def write_restart_file_v12(fname_in, fname_out, species, ensemb_names, spc_IC, e
     return ds_out
     
 def write_bc_ensemble_v12(start_date, start_lag, end_lag, ensemb_names, bc_dir,bc_str,
-                            out_dir, species = "CH4", ic_spc_names=["CH4IC"],
+                            out_dir, species, ic_spc_names, 
+                            latmin, latmax, lonmin, lonmax,
+                            bc_split="None",
                             BC_ensemble = False):
     """
     Write BC input files for ensemble GEOS-Chem runs.
@@ -1192,7 +1597,10 @@ def write_bc_ensemble_v12(start_date, start_lag, end_lag, ensemb_names, bc_dir,b
         date_str = re.search("([0-9]{8})", bc_file)[0]
         ds = open_ds(bc_file)
         
-        ch4_field = ds.SpeciesBC_CH4.copy()
+        # Cut BC ds down to domain size 
+        ds = ds.sel(lon=slice(lonmin-5., lonmax+5.), lat=slice(latmin-4, latmax+4))
+        
+        var_field = ds["SpeciesBC_" + species].copy()
         
 #        if pandas.to_datetime(date_str) == pandas.to_datetime(start_lag):
 #            ch4_field[1:,:,:,:]=0.
@@ -1200,10 +1608,10 @@ def write_bc_ensemble_v12(start_date, start_lag, end_lag, ensemb_names, bc_dir,b
 #            ch4_field[:,:,:,:]=0.         # Make CH4BC field 0 once the assimilation window has passed.
              
         if int(date_str) >= int(start_lag):   
-            ch4_field[:,:,:,:]=0.            # Set BC to 0 from the start hour of lag period.
+            var_field[:,:,:,:]=0.            # Set BC to 0 from the start hour of lag period.
             
-        ch4_field_out0 = ch4_field*0.
-        ch4_field_out0.attrs = ch4_field.attrs
+        var_field_out0 = var_field*0.
+        var_field_out0.attrs = var_field.attrs
         
         # Attributes not carried over after opearting on data array. 
         # HEMCO reads in units, so need to include attrs in copied fields.
@@ -1212,17 +1620,58 @@ def write_bc_ensemble_v12(start_date, start_lag, end_lag, ensemb_names, bc_dir,b
         # Unless I include these in the ensemble, in which case I will have to...
         if BC_ensemble == True:
             for name in ensemb_names:
-                ds["SpeciesBC_" + name] = ch4_field_out0 
+                ds["SpeciesBC_" + name] = var_field_out0 
                 ds["SpeciesBC_" + name].attrs["long_name"] = "Dry mixing ratio of species " + name
    
-        # But I do still want to include IC species
+        # But I do still want to include IC species?
         if len(ic_spc_names) > 0:
+            
+            
+            if bc_split == "NESW":
+                
+                #var_field of shape (ntime,nlev,nlat,nlon)
+                
+                lon  = var_field.lon.values
+                lat  = var_field.lat.values
+                
+                wh_lat0 = np.where(lat == latmin)[0][0]
+                wh_lat1 = np.where(lat == latmax)[0][0]
+                
+                wh_lon0 = np.where(lon == lonmin)[0][0]
+                wh_lon1 = np.where(lon == lonmax)[0][0]
+                
+                var_N = var_field_out0.copy()
+                var_E = var_field_out0.copy()
+                var_S = var_field_out0.copy()
+                var_W = var_field_out0.copy()
+                
+                var_N[:,:,wh_lat1-1:,wh_lon0+1:wh_lon1-1] = var_field[:,:,wh_lat1-1:,wh_lon0+1:wh_lon1-1]*1.
+                
+                var_E[:,:,:,wh_lon1-1:] = var_field[:,:,:,wh_lon1-1:]*1.
+                
+                var_S[:,:,:wh_lat0+1,wh_lon0+1:wh_lon1-1] = var_field[:,:,:wh_lat0+1:,wh_lon0+1:wh_lon1-1]*1.
+                
+                var_W[:,:,:,:wh_lon0+1] = var_field[:,:,:,:wh_lon0+1]
+                
+                
+                ds["SpeciesBC_" +species + "_BC1"] = var_N 
+                ds["SpeciesBC_" +species + "_BC2"] = var_E 
+                ds["SpeciesBC_" +species + "_BC3"] = var_S 
+                ds["SpeciesBC_" +species + "_BC4"] = var_W 
+            
+                
+                for spc_str in ["BC1", "BC2", "BC3", "BC4"]:
+                    ds["SpeciesBC_" + species + "_" + spc_str].attrs["long_name"] = "Dry mixing ratio of species " + species + "_" + spc_str
+#                if bc_file==files[0]:
+#                    var_N_out = var_N.copy()
+#                    var_E_out = var_E.copy()
+            
             for name2 in ic_spc_names:
-                if name2 == "CH4BC":
-                    ds["SpeciesBC_" + name2] = ch4_field 
+                if name2 == species + "BC":
+                    ds["SpeciesBC_" + name2] = var_field 
                     ds["SpeciesBC_" + name2].attrs["long_name"] = "Dry mixing ratio of species " + name2
-                elif name2 == "CH4IC":
-                    ds["SpeciesBC_" + name2] = ch4_field_out0
+                elif name2 == species + "IC":
+                    ds["SpeciesBC_" + name2] = var_field_out0
                     ds["SpeciesBC_" + name2].attrs["long_name"] = "Dry mixing ratio of species " + name2
                     #ds["SpeciesBC_" + name2].attrs = ch4_field.attrs 
                 #ds["SpeciesBC_" + name2].attrs["long_name"] = "Dry mixing ratio of species " + name2
@@ -1233,4 +1682,4 @@ def write_bc_ensemble_v12(start_date, start_lag, end_lag, ensemb_names, bc_dir,b
      
     print("Written BC files between " + start_date + " and " + end_lag + " to disk." )
     
-    return
+    return 
