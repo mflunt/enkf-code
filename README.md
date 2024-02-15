@@ -8,11 +8,7 @@ Contains:
   run_GC.py - Python script that reads in variables from input.ini and sets up input files for GEOS-Chem runs
   GC_setup_mod.py - Module file containing various functions that is called by run_GC.py
   
-  ./gc_files/
-  
-  getRuninfo
-  Makefile
-  validate.pl
+
   
   ./templates/
   
